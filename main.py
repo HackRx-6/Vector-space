@@ -1,6 +1,6 @@
 import os
 import asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, HttpUrl
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
@@ -17,6 +17,21 @@ import httpx
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Depends
 
+# ------------------- Middleware to print raw POST requests -------------------
+app = FastAPI()  # Temporarily create for middleware; will override later with lifespan
+
+@app.middleware("http")
+async def print_raw_request_body(request: Request, call_next):
+    if request.method == "POST":
+        try:
+            body_bytes = await request.body()
+            print("---- RAW REQUEST BODY ----")
+            print(body_bytes.decode(errors="ignore"))
+            print("--------------------------")
+        except Exception as e:
+            print(f"Failed to read request body: {e}")
+    response = await call_next(request)
+    return response
 
 # ------------------- Global Async HTTP Client -------------------
 global_http_client: httpx.AsyncClient = None
@@ -26,10 +41,8 @@ async def _download_file_in_parallel(client: httpx.AsyncClient, url: str) -> Opt
     try:
         head_resp = await client.head(url, follow_redirects=True)
         head_resp.raise_for_status()
-
         file_size = int(head_resp.headers.get('Content-Length', 0))
         accept_ranges = head_resp.headers.get("accept-ranges", "").lower()
-
         if "bytes" not in accept_ranges or file_size == 0:
             response = await client.get(url, follow_redirects=True)
             response.raise_for_status()
@@ -37,7 +50,6 @@ async def _download_file_in_parallel(client: httpx.AsyncClient, url: str) -> Opt
 
         chunk_size = 10 * 1024 * 1024
         num_chunks = min(file_size // chunk_size + 1, 16)
-
         if num_chunks < 2:
             response = await client.get(url, follow_redirects=True)
             response.raise_for_status()
@@ -54,12 +66,10 @@ async def _download_file_in_parallel(client: httpx.AsyncClient, url: str) -> Opt
             return resp.content
 
         results = await asyncio.gather(*[download_chunk(s, e) for s, e in chunk_ranges], return_exceptions=True)
-
         if any(isinstance(r, Exception) for r in results):
             response = await client.get(url, follow_redirects=True)
             response.raise_for_status()
             return response.content
-
         return b"".join(r for r in results if isinstance(r, bytes))
 
     except Exception:
@@ -129,6 +139,7 @@ async def get_text_from_document_url(url: str, batch_size: int = 250) -> Optiona
 # Load environment variables
 load_dotenv()
 
+# ------------------- Lifespan for Async HTTP Client -------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global global_http_client
@@ -152,12 +163,27 @@ async def lifespan(app: FastAPI):
     yield
     await global_http_client.aclose()
 
+# Override FastAPI app with lifespan
 app = FastAPI(
     title="Parallel In-Memory Q&A API",
     description="A stateless API to answer questions about PDF documents using parallel processing and configurable settings.",
     version="4.0.0",
     lifespan=lifespan
 )
+
+# Re-add middleware to the final app
+@app.middleware("http")
+async def print_raw_request_body(request: Request, call_next):
+    if request.method == "POST":
+        try:
+            body_bytes = await request.body()
+            print("---- RAW REQUEST BODY ----")
+            print(body_bytes.decode(errors="ignore"))
+            print("--------------------------")
+        except Exception as e:
+            print(f"Failed to read request body: {e}")
+    response = await call_next(request)
+    return response
 
 # --- API Models ---
 class PolicyInquiry(BaseModel):
