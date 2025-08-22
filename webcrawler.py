@@ -17,7 +17,6 @@ async def run_browser_task(task: str) -> str:
     """
     Send task to external endpoint and receive response
     """
-    # Replace with your actual external endpoint URL
     endpoint_url = "http://10.64.166.200:7860/webhook"
     
     async with aiohttp.ClientSession() as session:
@@ -25,6 +24,7 @@ async def run_browser_task(task: str) -> str:
         async with session.post(endpoint_url, json=payload) as response:
             if response.status == 200:
                 result = await response.json()
-                return result.get("response", "")
+                # Correct key returned by your Flask webhook
+                return result.get("output", "")
             else:
                 raise Exception(f"External service failed with status: {response.status}")
