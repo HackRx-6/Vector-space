@@ -72,7 +72,7 @@ async def handle_tool_calls(tool_calls) -> List[Dict[str, Any]]:
                 # Append the actual string result
                 tool_results.append({
                     "tool_call_id": tool_id,
-                    "content": result
+                    "content": str(result)
                 })
 
                 print(f"DEBUG: Tool {i} completed successfully")
@@ -162,7 +162,7 @@ async def execute_with_multi_tool_support(
                 current_messages.append({
                     "role": "tool",
                     "tool_call_id": result["tool_call_id"],
-                    "content": result
+                    "content": str(result)
                 })
 
 
