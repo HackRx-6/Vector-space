@@ -28,3 +28,8 @@ Pillow
 pandas
 rapidocr-onnxruntime
 memory_profiler
+flask
+flask-cors
+browser-use==0.2.7
+playwright
+langchain

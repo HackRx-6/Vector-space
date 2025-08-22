@@ -6,7 +6,7 @@ class GetRequestTool:
     
     def __init__(self):
         self.tool_name = "get_request"
-        self.tool_description = "Makes a GET request to a specified URL and returns the response."
+        self.tool_description = "Makes a GET request to a specified URL and returns the response, including full HTML content."
         self.tool_parameters = [
             {"name": "url", "type": "string", "description": "The URL to make the GET request to."}
         ]
@@ -57,18 +57,20 @@ class GetRequestTool:
                             "success": True,
                             "status_code": response.status_code,
                             "url": str(response.url),
-                            "data": {"text_content": response.text[:2000]},
+                            "data": {"text_content": response.text},  # full text now
                             "content_type": content_type
                         }
                 elif "text/" in content_type:
+                    # Return full text content (HTML or plain text)
                     return {
                         "success": True,
                         "status_code": response.status_code,
                         "url": str(response.url),
-                        "data": {"text_content": response.text[:2000]},
+                        "data": {"text_content": response.text},  # full HTML/text
                         "content_type": content_type
                     }
                 else:
+                    # Binary content
                     return {
                         "success": True,
                         "status_code": response.status_code,
