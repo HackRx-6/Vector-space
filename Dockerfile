@@ -1,37 +1,48 @@
+# 1. Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Install system dependencies for Chromium
-RUN apt-get update && apt-get install -y \
-    wget curl unzip fonts-liberation \
-    libasound2 libatk-bridge2.0-0 libatk1.0-0 libcups2 \
-    libdbus-1-3 libgdk-pixbuf-xlib-2.0-0 libnspr4 libnss3 libx11-xcb1 \
-    libxcomposite1 libxdamage1 libxrandr2 libxss1 libxtst6 xdg-utils \
-    libglib2.0-0 libgtk-3-0 libgbm1 libxshmfence1 libnss3-tools \
-    libxkbcommon0 libpango-1.0-0 libcairo2 libfontconfig1 \
-    libxext6 libxfixes3 libxrender1 libatspi2.0-0 libx11-6 libsm6 \
-    libexpat1 libxcb1 \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# 2. Set the working directory in the container
+WORKDIR /code
 
-# Set working directory
-WORKDIR /app
+# 3. Install system dependencies needed for Playwright and browsers
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl \
+        wget \
+        gnupg \
+        ca-certificates \
+        fonts-liberation \
+        libnss3 \
+        libatk-bridge2.0-0 \
+        libx11-xcb1 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxrandr2 \
+        libgbm1 \
+        libasound2 \
+        libpangocairo-1.0-0 \
+        libpango-1.0-0 \
+        libgtk-3-0 \
+        libcups2 \
+        libdrm2 \
+        libxshmfence1 \
+        && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (for caching)
-COPY requirements.txt .
+# 4. Copy the dependencies file to the working directory
+COPY ./requirements.txt /code/requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# 5. Install Python dependencies
+RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
-# Install Playwright + Chromium
-RUN python -m playwright install chromium
+# 6. Install Playwright and browser binaries
+RUN pip install --no-cache-dir playwright && \
+    playwright install --with-deps
 
-# Copy rest of the app
-COPY . .
+# 7. Copy the rest of the application's code to the working directory
+COPY . /code/
 
-# # Create a non-root user
-# RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
-# USER appuser
-
+# 8. Expose the port the app runs on. Hugging Face Spaces expects port 7860.
 EXPOSE 7860
 
-# Run the Flask app
-CMD ["python", "app.py"]
+# 9. Define the command to run your app using uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]

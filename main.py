@@ -5,6 +5,7 @@ from pydantic import BaseModel, HttpUrl
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
+import re
 from urllib.parse import urlparse
 from config import config, AppConfig
 import file_extractor
@@ -135,6 +136,15 @@ async def get_text_from_document_url(url: str, batch_size: int = 250) -> Optiona
             return file_ext
         case _:
             return "Unsupported file type"
+        
+# ------------------- URL Checking -------------------
+        
+def is_valid_url(url_string):
+        try:
+            result = urlparse(url_string)
+            return all([result.scheme, result.netloc]) and result.scheme in ['http', 'https']
+        except Exception:
+            return False
 
 # Load environment variables
 load_dotenv()
@@ -154,10 +164,10 @@ async def lifespan(app: FastAPI):
         http2=True,
         limits=limits,
         timeout=httpx.Timeout(
-            connect=10.0,
-            read=120.0,
-            write=10.0,
-            pool=5.0
+            connect=30.0,
+            read=600.0,
+            write=30.0,
+            pool=10.0
         )
     )
     yield
@@ -187,7 +197,8 @@ async def print_raw_request_body(request: Request, call_next):
 
 # --- API Models ---
 class PolicyInquiry(BaseModel):
-    url: HttpUrl
+    url: Optional[str] = None   # Make url optional
+    query: Optional[str] = None     # Add query field
     questions: List[str]
 
 class QAResponse(BaseModel):
@@ -201,50 +212,61 @@ async def run_submission(
     inquiry: PolicyInquiry,
     token: HTTPAuthorizationCredentials = Depends(security)
 ):
-    # Print token if provided
     if token and token.credentials:
         print(f"Auth token received: {token.credentials}")
-    
+
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(status_code=500, detail="Server configuration error: OPENAI_API_KEY is not set.")
 
     try:
-        print(inquiry.url)
-        print(inquiry.questions)
+        print("Incoming Inquiry:", inquiry.dict())
         inquiry.questions = await normalise_questions(inquiry.questions)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred during Language Normalisation: {e}")
+        raise HTTPException(status_code=500, detail=f"Error during Language Normalisation: {e}")
 
-    try:
-        document_text = await get_text_from_document_url(str(inquiry.url))
-        match document_text:
-            case "assume_url":
-                chunk = [str(inquiry.url)]
-                found_answers = await generate_answers_in_without_embedding(inquiry.questions, chunk)
-                return {"answers": found_answers}
-            case ".png" | ".jpg" | ".jpeg":
-                found_answers = await get_answers_async(inquiry.questions, str(inquiry.url))
-                return {"answers": found_answers}
-            case "Unsupported file type": 
-                raise HTTPException(status_code=500, detail="Unsupported file type")
-            case "" | None:
-                raise HTTPException(status_code=400, detail="Failed to download or extract text from the document.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred during processing: {e}")
-
-    try:
-        text_chunks = await asyncio.to_thread(chunk_text, document_text)
-        if len(text_chunks) < config.top_k:
+    # --- Case 1: Handle direct query ---
+    if inquiry.query:
+        try:
+            text_chunks = await asyncio.to_thread(chunk_text, inquiry.query)
             found_answers = await generate_answers_in_without_embedding(inquiry.questions, text_chunks)
+            return {"answers": found_answers}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error during query handling: {e}")
+        
+    if inquiry.url:
+         # Validate URL format
+        if not is_valid_url(str(inquiry.url)):
+            print("invalid url detected") 
         else:
-            faiss_index, chunks_for_qa = await create_in_memory_faiss_index(text_chunks)
-            found_answers = await generate_answers_in_parallel(inquiry.questions, faiss_index, chunks_for_qa)
-    except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred during embedding or answer generation: {e}")
+            try:
+                document_text = await get_text_from_document_url(str(inquiry.url))
+                match document_text:
+                    case "assume_url":
+                        chunk = [str(inquiry.url)]
+                        found_answers = await generate_answers_in_without_embedding(inquiry.questions, chunk)
+                        return {"answers": found_answers}
+                    case ".png" | ".jpg" | ".jpeg":
+                        found_answers = await get_answers_async(inquiry.questions, str(inquiry.url))
+                        return {"answers": found_answers}
+                    case "Unsupported file type":
+                        raise HTTPException(status_code=500, detail="Unsupported file type")
+                    case "" | None:
+                        raise HTTPException(status_code=400, detail="Failed to download or extract text from the document.")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error during document processing: {e}")
 
-    return {"answers": found_answers}
+            try:
+                text_chunks = await asyncio.to_thread(chunk_text, document_text)
+                if len(text_chunks) < config.top_k:
+                    found_answers = await generate_answers_in_without_embedding(inquiry.questions, text_chunks)
+                else:
+                    faiss_index, chunks_for_qa = await create_in_memory_faiss_index(text_chunks)
+                    found_answers = await generate_answers_in_parallel(inquiry.questions, faiss_index, chunks_for_qa)
+                return {"answers": found_answers}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error during embedding/answer generation: {e}")
+
+    raise HTTPException(status_code=400, detail="Either 'url' or 'query' must be provided.")
 
 # --- Configuration Endpoints ---
 @app.get("/config", response_model=AppConfig)

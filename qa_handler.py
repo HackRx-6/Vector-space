@@ -318,5 +318,28 @@ async def generate_answers_in_parallel(questions: List[str], index: faiss.Index,
 
 
 async def generate_answers_in_without_embedding(questions: List[str], chunks: List[str]) -> List[str]:
-    tasks = [get_answer_for_question_without_embedding(q, chunks) for q in questions]
-    return await asyncio.gather(*tasks, return_exceptions=True)
+    results = []
+    # Process questions one by one, waiting for each to complete before starting the next
+    for i, question in enumerate(questions, 1):
+        try:
+            print(f"Processing question {i}/{len(questions)}: {question[:100]}...")
+            
+            # Add timeout for individual question processing
+            result = await asyncio.wait_for(
+                get_answer_for_question_without_embedding(question, chunks),
+                timeout=900  # 15 minutes per question
+            )
+            results.append(result)
+            print(f"Question {i} completed successfully")
+            
+        except asyncio.TimeoutError:
+            error_msg = f"Question {i} timed out after 15 minutes"
+            print(f"ERROR: {error_msg}")
+            results.append(error_msg)
+            
+        except Exception as e:
+            error_msg = f"Question {i} failed: {str(e)}"
+            print(f"ERROR: {error_msg}")
+            results.append(e)
+            
+    return results
