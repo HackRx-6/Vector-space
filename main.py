@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from config import config, AppConfig
 import file_extractor
 from text_chunker import chunk_text, create_in_memory_faiss_index
-from qa_handler import generate_answers_in_parallel, generate_answers_in_without_embedding
+from qa_handler import generate_answers_in_parallel, generate_answers_in_without_embedding, generate_answers_for_url
 from image_handler import get_answers_async
 from language_normaliser import normalise_questions, normalise_language
 import io
@@ -221,15 +221,17 @@ async def run_submission(
         raise HTTPException(status_code=500, detail=f"Error during Language Normalisation: {e}")
 
     if inquiry.documents:
-        inquiry.documents = await normalise_language(str(inquiry.documents))
-        path = urlparse(str(inquiry.documents)).path
+        try:
+            path = urlparse(str(inquiry.documents)).path
+        except:
+            path = ""
         file_ext = os.path.splitext(path)[1].lower()
         print(file_ext)
         if not file_ext or file_ext == '.':
             print("Not Document")
         else:
             try:
-                document_text = await get_text_from_document_url(str(inquiry.url), file_ext)
+                document_text = await get_text_from_document_url(str(inquiry.documents), file_ext)
                 match document_text:
                     case ".png" | ".jpg" | ".jpeg":
                         found_answers = await get_answers_async(inquiry.questions, str(inquiry.url))
@@ -258,7 +260,7 @@ async def run_submission(
         else:
             try:
                 chunk = [str(inquiry.url)]
-                found_answers = await generate_answers_in_without_embedding(inquiry.questions, chunk)
+                found_answers = await generate_answers_for_url(inquiry.questions, chunk)
                 return {"answers": found_answers}
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Error during URL processing: {e}")

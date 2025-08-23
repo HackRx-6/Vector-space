@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 from dotenv import load_dotenv
 from config import config
 from webcrawler import run_browser_task
+from get_request_tool import get_request_tool
 import re
 import os
 import requests
@@ -14,7 +15,8 @@ import base64
 from pathlib import Path
 load_dotenv()
 
-
+ASYNC_CLIENT_EMBEDDING = AsyncOpenAI()
+client = OpenAI()
 
 ASYNC_CLIENT = AsyncOpenAI(
     base_url="https://register.hackrx.in/llm/openai",
@@ -38,7 +40,7 @@ TOOLS_CONFIG = [
     {
         "type": "function",
         "function": {
-            "name": "make_get_request",
+            "name": "web_crawller",
             "description": "Execute browser automation tasks based on the given prompt and return the result",
             "parameters": {
                 "type": "object",
@@ -54,6 +56,39 @@ TOOLS_CONFIG = [
     }
 ]
 
+GET_TOOL_CONFIG = [
+    {
+        "type": "function",
+        "function": {
+            "name": "make_get_request",
+            "description": "Make HTTP GET requests to APIs and return JSON responses. Use when you need real-time data or external information not available in the document context. You can call this multiple times for different APIs or endpoints.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The complete URL to make the GET request to"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Optional headers to include in the request",
+                        "additionalProperties": {"type": "string"}
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "Optional query parameters to append to the URL",
+                        "additionalProperties": {"type": "string"}
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Optional Bearer token for authentication"
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    }
+]
 
 TOOLS_CONFIG_QUERY = [
     {
@@ -180,14 +215,14 @@ async def handle_tool_calls(tool_calls) -> List[Dict[str, Any]]:
 
         print(f"DEBUG: Executing tool {i}/{len(tool_calls)}: {tool_name}")
 
-        if tool_name == "make_get_request":
+        if tool_name == "web_crawller":
             try:
                 if isinstance(tool_args, str):
                     tool_args = json.loads(tool_args)
 
                 prompt = tool_args.get("prompt", "")
                 if not prompt:
-                    raise ValueError("No prompt provided for make_get_request")
+                    raise ValueError("No prompt provided for web_crawller")
 
                 print(f"DEBUG: Running browser task with prompt: {prompt}")
                 result = await run_browser_task(task=prompt)
@@ -270,7 +305,37 @@ async def handle_tool_calls(tool_calls) -> List[Dict[str, Any]]:
                         "error_type": "tool_error"
                     })
                 })
-
+        elif tool_name == "make_get_request":
+            try:
+                if isinstance(tool_args, str):
+                    tool_args = json.loads(tool_args)
+                
+                print(f"DEBUG: Making GET request to: {tool_args.get('url', 'NO_URL')}")
+                
+                result = await get_request_tool.execute_get_request(
+                    url=tool_args.get("url", ""),
+                    headers=tool_args.get("headers"),
+                    params=tool_args.get("params"), 
+                    auth_token=tool_args.get("auth_token")
+                )
+                
+                tool_results.append({
+                    "tool_call_id": tool_id,
+                    "content": json.dumps(result, indent=2)
+                })
+                
+                print(f"DEBUG: Tool {i} completed successfully, result: {json.dumps(result, indent=2)}")
+                
+            except Exception as e:
+                print(f"DEBUG: Tool {i} failed with error: {e}")
+                tool_results.append({
+                    "tool_call_id": tool_id,
+                    "content": json.dumps({
+                        "success": False,
+                        "error": f"Tool execution failed: {str(e)}",
+                        "error_type": "tool_error"
+                    })
+                })
     return tool_results
 
 
@@ -358,6 +423,86 @@ async def execute_with_multi_tool_support(
             return current_answer
 
 
+    print(f"WARNING: Reached maximum tool rounds ({max_tool_rounds})")
+    return current_answer
+
+async def execute_with_multi_tool_support_document(
+    messages: List[Dict[str, Any]], 
+    max_tool_rounds: int = 5
+) -> str:
+   
+    current_messages = messages.copy()
+    tool_round = 0
+    
+    while tool_round < max_tool_rounds:
+        print(f"DEBUG: Tool round {tool_round + 1}/{max_tool_rounds}")
+        
+        # Make API call with tools available
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=config.qa_model,
+            messages=current_messages,
+            temperature=1.0,
+            tools=GET_TOOL_CONFIG  # ALWAYS include tools
+        )
+        
+        message = response.choices[0].message
+        current_answer = message.content.strip() if message.content else ""
+        
+        print(f"DEBUG: LLM response: {current_answer[:200]}...")
+        
+        # Add assistant's response to conversation
+        assistant_message = {
+            "role": "assistant", 
+            "content": current_answer
+        }
+        
+        # If there are tool calls, add them to the message
+        if message.tool_calls:
+            assistant_message["tool_calls"] = [
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments
+                    }
+                }
+                for tool_call in message.tool_calls
+            ]
+            
+            current_messages.append(assistant_message)
+            
+            print(f"DEBUG: LLM wants to make {len(message.tool_calls)} tool calls")
+            
+            # Execute all tool calls
+            tool_results = await handle_tool_calls([
+                {
+                    "id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "arguments": json.loads(tool_call.function.arguments)
+                }
+                for tool_call in message.tool_calls
+            ])
+            
+            # Add tool results to conversation
+            for result in tool_results:
+                current_messages.append({
+                    "role": "tool",
+                    "tool_call_id": result["tool_call_id"],
+                    "content": result["content"]
+                })
+            
+            tool_round += 1
+            
+            # Continue the loop - LLM can now make more tool calls if needed
+            
+        else:
+            # No tool calls - we're done
+            print(f"DEBUG: No tool calls requested, finishing after {tool_round} rounds")
+            return current_answer
+    
+    # Reached max tool rounds
     print(f"WARNING: Reached maximum tool rounds ({max_tool_rounds})")
     return current_answer
 
@@ -449,8 +594,26 @@ async def execute_with_multi_tool_query(
 
 
 # UPDATED SYSTEM PROMPT - Emphasizes multi-tool capability with prompt-based browser automation
+DOCUMENT_SYSTEM_PROMPT = """You are an expert QA system. Your task is to answer user queries by extracting the most relevant, concise, and precise information from a provided chunk of a document or from tool call responses. Answer user queries based on the context provided and any data received from get api function. Do not rely on prior knowledge or assumptions. Follow the instructions given in document one after the other for tool calls. If you make tool calls, base your answer primarily on the response data received. If the answer to the question is not clearly present in the given chunks or tool responses, respond with "The answer is not available in the document."
+
+Available Tools:
+- make_get_request: Make HTTP GET requests to fetch html content of the url. you use can multiple times.
+Instructions:
+- Extract information if tool used and take appropiate steps and actions.
+- Give the most concise answer as you can.
+- Carefully examine the given context to give right answers.
+- Strictly answer based on context only after Get Request.
+- Verify your answer twice before answering.
+
+Output Format:
+- A single, concise sentence or two directly answering the question.
+- OR, if the answer is not in the context, the exact phrase "The answer is not available in the document."
+- Use only the information from the provided chunks AND any API responses.
+- Be as concise and precise as possible."""
+
+
 MULTI_TOOL_SYSTEM_PROMPT = """You are an agent that has access to browser automation tools. Use the tool by providing it with a detailed prompt like which link to procced with and then step by step that includes exact steps to follow and what to extract, then give the answer accordingly. Be specific about what actions the browser should take and what information should be returned. the retyne type from tool can be any thing extract detain fromm there. 
-For file operations: You can save files locally using save_file tool and git_push_tool to push them to GitHub repositories."""
+For file operations: web_crawller is the tool to search and crawl web"""
 
 QUERY_SYSTEM_PROMPT = """You are an agent that obeys user instructions, that has access to automation tools to procced with.
 Available Tools: You can save files locally using save_file tool and git_push_tool to push files using save_file tool to GitHub repositories without extra details.
@@ -459,7 +622,7 @@ Tool Instruction: Repo name and owner is already set make sure to push the code"
 async def get_answer_for_question(question: str, index: faiss.Index, chunks: List[str]) -> str:
     try:
         # Step 1 — Generate embedding
-        embedding_response = await ASYNC_CLIENT.embeddings.create(
+        embedding_response = await ASYNC_CLIENT_EMBEDDING.embeddings.create(
             input=question,
             model=config.embedding_model,
         )
@@ -517,13 +680,13 @@ async def get_answer_for_question(question: str, index: faiss.Index, chunks: Lis
 
 
             initial_messages = [
-                {"role": "system", "content": MULTI_TOOL_SYSTEM_PROMPT},
+                {"role": "system", "content": DOCUMENT_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
             ]
 
 
             # Step 5 — Execute with tools
-            current_answer = await execute_with_multi_tool_support(
+            current_answer = await execute_with_multi_tool_support_document(
                 initial_messages,
                 max_tool_rounds=3
             )
@@ -549,7 +712,7 @@ async def get_answer_for_question(question: str, index: faiss.Index, chunks: Lis
     return last_answer
 
 
-async def get_answer_for_question_without_embedding(question: str, chunks: List[str]) -> str:
+async def get_answer_for_url(question: str, chunks: List[str]) -> str:
     try:
         context = "\n---\n".join(chunks)
 
@@ -595,7 +758,7 @@ async def get_answer_for_question_query(question: str, chunks: List[str]) -> str
         # Execute with multi-tool support
         current_answer = await execute_with_multi_tool_query(
             initial_messages,
-            max_tool_rounds=3
+            max_tool_rounds=1
         )
 
 
@@ -611,6 +774,34 @@ async def get_answer_for_question_query(question: str, chunks: List[str]) -> str
         print(f"DEBUG: ERROR during chat completion API call: {e}")
         return f"LLM Error: {e}"
 
+async def get_answer_for_question_without_embedding(question: str, chunks: List[str]) -> str:
+    try:
+        context = "\n---\n".join(chunks)
+
+        user_prompt = f"{question}\n{context}"
+        
+        initial_messages = [
+            {"role": "system", "content": DOCUMENT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        # Execute with multi-tool support
+        current_answer = await execute_with_multi_tool_support_document(
+            initial_messages,
+            max_tool_rounds=3
+        )
+
+        print(f"DEBUG: Final answer after tool execution: {current_answer}")
+        print("-" * 60)
+        
+        if current_answer not in FAILED_ANSWER_PHRASES:
+            return current_answer
+        else:
+            return current_answer
+            
+    except Exception as e:
+        print(f"DEBUG: ERROR during chat completion API call: {e}")
+        return f"LLM Error: {e}"
 
 
 
@@ -619,6 +810,9 @@ async def generate_answers_in_parallel(questions: List[str], index: faiss.Index,
     tasks = [get_answer_for_question(q, index, chunks) for q in questions]
     return await asyncio.gather(*tasks, return_exceptions=True)
 
+async def generate_answers_for_url(questions: List[str], chunks: List[str]) -> List[str]:
+    tasks = [get_answer_for_url(q, chunks) for q in questions]
+    return await asyncio.gather(*tasks, return_exceptions=True)
 
 async def generate_answers_in_without_embedding(questions: List[str], chunks: List[str]) -> List[str]:
     tasks = [get_answer_for_question_without_embedding(q, chunks) for q in questions]

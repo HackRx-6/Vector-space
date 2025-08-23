@@ -54,7 +54,7 @@ async def normalise_language(question: str) -> str:
 
     # Remove newlines and normalize whitespace
     # question = re.sub(r'\n+', ' ', question)
-    question = re.sub(r'\s+', ' ', question)
+    # question = re.sub(r'\s+', ' ', question)
     
     return question.lower().strip()
 
