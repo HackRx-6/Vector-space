@@ -508,7 +508,7 @@ async def execute_with_multi_tool_support_document(
 
 async def execute_with_multi_tool_query(
     messages: list,
-    max_tool_rounds: int = 2
+    max_tool_rounds: int = 5
 ) -> str:
     current_messages = messages.copy()
     tool_round = 0
