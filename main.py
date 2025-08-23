@@ -12,7 +12,7 @@ import file_extractor
 from text_chunker import chunk_text, create_in_memory_faiss_index
 from qa_handler import generate_answers_in_parallel, generate_answers_in_without_embedding
 from image_handler import get_answers_async
-from language_normaliser import normalise_questions
+from language_normaliser import normalise_questions, normalise_language
 import io
 import httpx
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -89,12 +89,7 @@ async def _download_file(client: httpx.AsyncClient, url: str) -> Optional[bytes]
     except:
         return None
 
-async def get_text_from_document_url(url: str, batch_size: int = 250) -> Optional[str]:
-    path = urlparse(url).path
-    file_ext = os.path.splitext(path)[1].lower()
-    if not file_ext:
-        return "assume_url"
-
+async def get_text_from_document_url(url: str, file_ext: str, batch_size: int = 250) -> Optional[str]:
     match file_ext:
         case '.pdf':
             content_bytes = await _download_file_in_parallel(global_http_client, url)
@@ -197,6 +192,7 @@ async def print_raw_request_body(request: Request, call_next):
 
 # --- API Models ---
 class PolicyInquiry(BaseModel):
+    documents: Optional[str] = None 
     url: Optional[str] = None   # Make url optional
     query: Optional[str] = None     # Add query field
     questions: List[str]
@@ -224,27 +220,17 @@ async def run_submission(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during Language Normalisation: {e}")
 
-    # --- Case 1: Handle direct query ---
-    if inquiry.query:
-        try:
-            text_chunks = await asyncio.to_thread(chunk_text, inquiry.query)
-            found_answers = await generate_answers_in_without_embedding(inquiry.questions, text_chunks)
-            return {"answers": found_answers}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error during query handling: {e}")
-        
-    if inquiry.url:
-         # Validate URL format
-        if not is_valid_url(str(inquiry.url)):
-            print("invalid url detected") 
+    if inquiry.documents:
+        inquiry.documents = await normalise_language(str(inquiry.documents))
+        path = urlparse(str(inquiry.documents)).path
+        file_ext = os.path.splitext(path)[1].lower()
+        print(file_ext)
+        if not file_ext or file_ext == '.':
+            print("Not Document")
         else:
             try:
-                document_text = await get_text_from_document_url(str(inquiry.url))
+                document_text = await get_text_from_document_url(str(inquiry.url), file_ext)
                 match document_text:
-                    case "assume_url":
-                        chunk = [str(inquiry.url)]
-                        found_answers = await generate_answers_in_without_embedding(inquiry.questions, chunk)
-                        return {"answers": found_answers}
                     case ".png" | ".jpg" | ".jpeg":
                         found_answers = await get_answers_async(inquiry.questions, str(inquiry.url))
                         return {"answers": found_answers}
@@ -265,6 +251,25 @@ async def run_submission(
                 return {"answers": found_answers}
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Error during embedding/answer generation: {e}")
+    if inquiry.url:
+         # Validate URL format
+        if not is_valid_url(str(inquiry.url)):
+            print("invalid url detected") 
+        else:
+            try:
+                chunk = [str(inquiry.url)]
+                found_answers = await generate_answers_in_without_embedding(inquiry.questions, chunk)
+                return {"answers": found_answers}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error during URL processing: {e}")
+    if inquiry.query:
+        try:
+            inquiry.query = await normalise_language(str(inquiry.questions))
+            text_chunks = await asyncio.to_thread(chunk_text, inquiry.query)
+            found_answers = await generate_answers_in_without_embedding(inquiry.questions, text_chunks)
+            return {"answers": found_answers}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error during query handling: {e}")
 
     raise HTTPException(status_code=400, detail="Either 'url' or 'query' must be provided.")
 
@@ -280,7 +285,7 @@ async def update_config(new_config: Dict[str, Any]):
     
     try:
         new_app_config = AppConfig(**updated_data)
-        config._dict.update(new_app_config.dict_)
+        config.dict.update(new_app_config.dict)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid configuration: {e}")
         

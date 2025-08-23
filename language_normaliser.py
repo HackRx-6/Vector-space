@@ -51,8 +51,12 @@ async def normalise_language(question: str) -> str:
         # Use the detected language's Unicode range
         pattern = LANGUAGE_RANGES[language]
         question = re.sub(f"[^{pattern[1:-1]}\s.,!?%()\-–—:;\'\"0-9]", "", question)
+
+    # Remove newlines and normalize whitespace
+    # question = re.sub(r'\n+', ' ', question)
+    question = re.sub(r'\s+', ' ', question)
     
-    return question.strip()
+    return question.lower().strip()
 
 async def normalise_questions(questions: List[str]) -> List[str]:
     tasks = [normalise_language(q) for q in questions]
